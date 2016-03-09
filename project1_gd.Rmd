@@ -1,0 +1,290 @@
+---
+title: "Project1"
+author: "Greg Dimock"
+date: "03/08/2016"
+output: html_document
+---
+
+To start exploring energy load data, three datasets will be read in: electric load data, weather data, and billing data. The load and billing data are read from an excel file using the readxl library, with the read_excel function. Initially, only 65536 rows were being read in, likely due to the file being read as a pre-2007 excel workbook. However this was easily fixed by re-saving the electric load file as another excel workbook. The weather data is a text file and is read in with fixed width parsing. 
+
+```{r}
+options(width=120)
+
+#load required library to read in excel files 
+library(readxl)
+
+#write a getloaddf() function to read in the electric load data. Within the function, some clean up #is performed on the informats of the date and time columns. They are then combined to create a #dates column with the paste and strptime functions. Additionally they are converted to POSIX.ct #format. The final format for dates is in month-day-year Hour:Min. The dates range from 1/1/2014 to 12/30/2015. 
+
+#Note: The hour is specified for the hour in which the reading took place, not necessarily what hour the meter reading was for. For example, at a 1pm reading, this is associated with the 1pm hour during aggregation, even though it is a result of 12:45pm - 1pm window. This 15 minute shift will not cause a major change in the overall results. 
+
+#The ... for the function inputs is used to pass arguments to the read_excel function. 
+getloaddatadf <- function(filepath,...){
+  tempds <- read_excel(filepath,...)
+  tempds$WideDate <- ifelse(nchar(tempds$DATE) < 6 ,                                                          paste('0',tempds$DATE,sep=''),tempds$DATE)
+  tempds$HOUR <- substr(tempds$TIME,1,nchar(tempds$TIME)-2)
+  tempds$HOUR <- ifelse(tempds$HOUR == '','0',tempds$HOUR)
+  tempds$MIN <- substr(tempds$TIME,nchar(tempds$TIME)-1,nchar(tempds$TIME))
+  tempds$Dates <- as.POSIXct(strptime(paste(tempds$WideDate,tempds$HOUR,tempds$MIN,sep=' '),format = '%m%d%y %H %M')
+                            )
+  outdsn <- subset(tempds,select = c(Dates,kWh,kVARh))
+  return(outdsn)
+}
+
+#call the function and return the result to eloaddf
+eloaddf <- getloaddatadf(
+            filepath= "C:/Users/User/Documents/GitHub/project1/elecloaddata2.xlsx"              ,sheet = 1, col_names = TRUE,col_types = NULL)
+
+#Now lets view what the eloaddf looks like: 
+head(eloaddf,n = 5)
+
+
+#Write the function to read in the text file weather data. 
+getweatherdf <- function(filepath,...){
+  indsn <- read.fwf(filepath,...)
+  indsn$Dates <- as.POSIXct(strptime(as.character(indsn$DATETIME),format = '%Y%m%d%H%M' ))
+  indsn$TEMP <- as.numeric(as.character(indsn$TEMP))
+  return(indsn)
+}
+
+#Set parameters to read into getweatherdf function. The data specs doc on the fixed width column #positions were used to create the filewidths vector
+myweatherfile <- "C:/Users/User/Documents/GitHub/project1/1874606932872dat.txt"
+filewidths <- c(7,6,13,4,4,4,4,4,2,2,2,5,3,3,3,3,3,3,3,3,2,5,5,7,6,7,4,4,6,6,6,6,2)
+colname_vec <- c('STATION','WBAN_ID','DATETIME','WIND_DIR','WIND_SPD','WIND_GUS','CLOUD_CEIL','SKY_COVER','LOW_CLOUD','MID_CLOUD','HIGH_CLOUD','VISIB','MW1','MW2','MW3','MW4','AW1','AW2','AW3','AW4','PW','TEMP','DEWP','SLP','ALT','STP','MAX_TEMP','MIN_TEMP','PCP01','PCP06','PCP24','PCPXX','SNOW')
+
+#call the getweatherdf function 
+weatherdf <- getweatherdf(filepath = myweatherfile,widths = filewidths,col.names = colname_vec,skip = 1)
+#Removes rows that havea missing temperature data information -- which will become important when we start building models.
+weatherdf <- weatherdf[complete.cases(weatherdf["TEMP"]),]
+
+
+#Let's view the weather data as well: 
+head(weatherdf, n = 5)
+
+#similar to the getelecloaddf() function, we use the read_excel function again 
+getbillsdf <- function(filepath,...){
+  indsn <- read_excel(filepath,...)
+  return(indsn[1:12,])
+}
+
+#set parameters for getbillsdf function
+mybilldata <- "C:/Users/User/Documents/GitHub/project1/billdata.xlsx"
+col_names_bill<-c('billdate', 'billstartdt', 'billenddt', 'kwh', 'mindemandkw', 'actualdemandkw', 'custcharge','distchrgkw', 'mttkwh', 'tbckwh','nugckwh', 'sbckwh', 'rggieekwh', 'deliverykwh','totdeliverychrg', 'supplychrg', 'totalchrg')
+
+#call getbillsdf function
+billsdf <- getbillsdf(filepath = mybilldata,sheet = 1, col_names = col_names_bill,col_types = NULL, skip = 1)
+
+#And lets view the billing information data. 
+head(billsdf,n = 2)
+```
+
+
+Next, lets look at the monthly profile of the electric load data. 
+
+```{r}
+# Here, I would like to clean this section up further, sorting the results in the correct, calender - order, and presenting the output in a cleaner fashion. 
+kWHbyMonth <- data.frame(eloaddf$kWh,format(eloaddf$Dates, '%b-%Y'))
+names(kWHbyMonth) <- c('kWh','Month')
+agg_unsorted <- aggregate(kWh ~ Month,kWHbyMonth,sum)
+#Dividing kWh by 4 as they are reported in 15 minute increments 
+agg_unsorted$kWh <- agg_unsorted$kWh / 4
+agg_unsorted
+
+```
+
+Now let us do some plotting of the load data. 
+
+```{r}
+
+
+# I have taken advantage of the aggregate and format functions, but this results in returning a character format to the aggregated value. Therefore, I re applied the POSIXct format. I was unable to find a more direct function can that just aggregate and keep date format. Lubridate and xts packages were explored but not implemented. Methods to conditionally loop through the entire dataset were considered but not atempted or tested. 
+
+eloadhrdf <- aggregate(kWh ~ format(Dates,'%d%m%Y:%H'),eloaddf,mean)
+names(eloadhrdf) <- c('DayHour','kWh')
+eloadhrdf$DayHour <- as.POSIXct(strptime(eloadhrdf$DayHour, format = '%d%m%Y:%H'))
+
+#Since the eloadhrdf is summarized only by hour, I will create another dataframe that averages the hourly data per month. This new dataframe will then be the correct format to pass into a ggplot2 heatmap. I wil subset based on year to create side by side comparisons for 2014 and 2015, rather than create two seperate dataframes for each year. 
+
+library("ggplot2")
+eloadhrdf$Month <- as.factor(format(eloadhrdf$DayHour, "%m"))
+eloadhrdf$Hour <- as.factor(format(eloadhrdf$DayHour, "%H"))
+eloadhrdf$Year <- as.factor(format(eloadhrdf$DayHour, "%Y"))
+loadprofiledf <- aggregate(kWh ~ Year + Month + Hour, data = eloadhrdf, FUN = "mean")
+
+#Create a heatmap and view it. 
+heatmap1 <- ggplot(data = loadprofiledf, mapping = aes(Month, Hour)) + geom_tile(aes(fill = kWh), colour = "white")+ scale_fill_gradient(low = "white", high = "steelblue") + facet_wrap(~Year) + ggtitle("Energy Profile by Hour and Month")
+heatmap1
+
+```
+
+
+We plot the weather data using boxplot to explore the variation in temperature graphically
+
+```{r}
+# plot the weather data. Use boxplots in ggplot2 with month on the x-axis and temperature in y-axis
+#convert data columns to the appropiate format for months and temps. Some NAs will be introduced from converting the TEMP, which is currently a factor to numeric because of the ** values in the raw data 
+weatherdf$TEMP <- as.numeric(as.character(weatherdf$TEMP))
+weatherdf$Month <- as.factor(format(weatherdf$Dates,'%m'))
+#location is Cumberland County; NJ
+
+boxplot <- ggplot(data = na.omit(weatherdf),mapping = aes(x = Month, y = TEMP )) + geom_boxplot() + scale_y_continuous(name = "Temperature (F)" , breaks = seq(0,100,10)) + xlab("Month")+ ggtitle("Temperature Profile by Month ")
+boxplot
+
+
+```
+
+The weather station that the readings were taken at is from Cumberland County NJ, and the box plot shows temperatures that would be expected of this region. Colder in January and February, with a few days falling below 0 a few days in the winter months and the warmer summer months having their hottest temperatures just above 90 F. 
+
+The heatmap also shows some intersting trends. As expected the nightly hours between Midnight and 7am use the least amount of energy, and working hours during the day, 8am - 6pm, use the most. One interesting thing to point out is how much less energy is being used in the winter months. (This seems non-intuitive if this was energy data for a business or household, as they would have to heat their buildings, but I do not know what this data is representative of).  Furthermore, Month 10 (October), uses the most amount of energy by far. It would be interesting to dive deeper into why October uses the most energy, both in 2014 and 2015. 
+
+We are now ready to build a simple predictive model.
+
+```{r}
+#create a dataframe with hourly interval data inside your function by 
+# combining selective columns from eloadhrdf and weatherdf
+# your dataframe should be called modeldatadf and the columns should be dates, year, month, hrofday, temp, kwh
+
+#The weather dataset observations are taken at the 54 minute mark of each hour, so they will be round up to the nearest hour. 
+weatherdf$DayHour <- as.POSIXct(round(weatherdf$Dates,"hour"))
+
+
+#have not yet incorporated it into a function: 
+#dates, year, month, hrofday, temp, kwh : subset(mydata, select = c(x,z) )
+
+predmodeldf <- merge(weatherdf,eloadhrdf,by = "DayHour")
+predmodeldf <- predmodeldf[c("DayHour","Year","Month.x","Hour","TEMP","kWh")]
+names(predmodeldf) <-c("Dates","Year","Month","Hour","TEMP","kWh")
+toy.model <- glm(kWh ~ Month + Hour + TEMP, data = predmodeldf,na.action = na.omit, subset = Year == 2014)
+
+base_model <- summary(toy.model)
+```
+
+Since a GLM model was used, we can use a pseudo R-squared to define a metric of how well the model predicts the target - kWh. Additionally we can compute the Root Mean Squared Error, and compare this, as well as the pseudo R-squared to future machine learning models to see how they perform relative to this model. 
+
+```{r}
+
+#Calculating McFaddens psuedo-R^2: 
+base_model.pseudo_rsq = 1 - (as.numeric(base_model["deviance"])/as.numeric(base_model["null.deviance"]))
+base_model.pseudo_rsq
+
+#Calculating RMSE
+library(qpcR)
+RMSE(toy.model)
+
+#Displaying summary statistics 
+summary(toy.model)
+
+
+```
+
+Refering to the covariate estimates above, it is first important to note that dummy coding has been used for the categorical variables -- months and hours. The "dummy" or reference value was hour0 and Month1(January), which is why neither of these values have estimates, as they are built into the intercept term. So the coefficent of 16.3 on Month07 (July) means that, on average July's hourly kWh usage is 16.3 kWh higher than that of January (holding all other covariates constant). Likewise, on average 5.6 less kWh are used in Hour2 compared to Hour0 (holding all other covariates constant). 
+
+Furthermore, we see that nearly all of the other values in these categories are highly statistically signicant, with a p-values approaching 0 for most and a few below 0.001. However, two variables (Month2 -- February, and Hour1) are not statistically significant, but this does not mean they are not important to the prediction. They are not-signicant because of the base/dummy levels chosen in the reference coding system. Meaning, on average, the kWh used in February is not statistically different from January. Likewise, on average, the kWh in Hour1 are not statistically different than Hour0. Both of these make sense inuitative, and it would be likely that if a difference reference level was chosen, one of its adjacent levels would not be significant. A different coding method, such as effects coding could also be implemented where each level is compared to the mean. There, we might expect months or hours, close to the overall mean become not significant, whears months like January, or hours like Midnight (Hour0), would become significant. 
+
+Temperature also has a highly significant affect on the model as well. The result of this general lineaer model is that for each degree increase in temperature, one can expect on average, kWhs by hour to increase by 0.56 (holding all other covariates constant). Intuitavely, there may be more than just a linear relationship with Temperature on electric load, but that can be explored in the machine learning model. However, as a quick check, we can plot Temperature by kWh for a specifc hour and month (which would be "holding all other covariates constant"). Below we see that there is a positive, linear trend between Temperature and kWh, although there is a noticable amount of noise/deviance. It may be the case that there is a higher order temperature term as well would better explain the relationship. 
+
+```{r}
+#Plot 2 scatter plots for Temp vs. kWh 
+library(gridExtra)
+scatterdf1 <- subset(predmodeldf,Hour == "02" & Month == "05")
+scatter1 <- ggplot(scatterdf1,aes(x=kWh,y=TEMP)) + geom_point() + ggtitle("February, Hour5")
+scatterdf2 <- subset(predmodeldf,Hour == "16" & Month == "10")
+scatter2 <- ggplot(scatterdf2,aes(x=kWh,y=TEMP)) + geom_point() + ggtitle("October, Hour16")
+grid.arrange(scatter1,scatter2,ncol=2)
+```
+
+Next we will explore building a machine learning model 
+```{r}
+
+library(lattice)
+library(caret)
+library(gbm)
+library(plyr)
+  
+#Split the model into training and testing 
+trainmodeldf <- subset(predmodeldf,subset = Year == 2014)
+testmodeldf <- subset(predmodeldf,subset = Year == 2015)
+
+#Run through itterations of the GBM algorithm 
+Grid <- expand.grid( n.trees = seq(25,250,25), interaction.depth = c(1,6,30), shrinkage = c(0.1),n.minobsinnode = c(20))
+supress <- capture.output(fit.modelgbm <- train(kWh ~ Month + Hour + TEMP , data = trainmodeldf, method = "gbm",metric='RMSE',tuneGrid=Grid))
+
+ggplot(fit.modelgbm) 
+
+```
+
+The plot shown, shows that a interaction depth of 6 results in the best model, and around 200 trees the performance of the model becomes more or less constant, with an RMSE ~ 25.4. This so far is nearly the same as the toy model which had a RMSE of 25.7. Without further training and tuning of the model, the more parsimonious model should be chosen, which was the initial GLM model. 
+
+However, I will move on and test the perfomance of the  gradient-boosted tree model on the testing dataset. 
+
+```{r}
+# Create predications for dataset matching length of time on billing data
+end2014df <- subset(trainmodeldf,trainmodeldf$DayHour >= as.POSIXct('2014-12-20 00:00:00'))
+testmodeldf <- rbind(end2014df,testmodeldf)
+pred2015df.predict <- predict(fit.modelgbm, newdata = testmodeldf, type = "raw",na.action = na.omit)
+pred2015df.rmse <- sqrt(mean((pred2015df.predict - testmodeldf$kWh)^2))
+pred2015df.rmse
+
+#On the test data, we see the RMSE is 27.73. 
+
+predictions <- predict(fit.modelgbm, newdata = testmodeldf, type = "raw",na.action = na.omit)
+
+```
+
+
+```{r}
+#Create a dataframe with dates and predictions, and add in the actual kWh from Billsdf 
+
+pred2015df <- data.frame(testmodeldf$Dates,predictions)
+names(pred2015df) <- c("DayHour","PredkWh")
+# call your data frame pred2015df.
+# now for each of the 12 rows (billing periods) in the billsdf, sum the kwh for the date range in each of the rows from pred2015df for the corresponding start and end of billing in billsdf 
+# create a resultsdf which has billdate, predkwh (from pred2015df), actualkwh (from billsdf)
+# display the results
+
+
+# A brute force method was used to partion the Dates into the billing periods in the Billsdf. apply and ddply were explored but not implemented.
+#Period 1
+
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-01-29 00:00:00',format ='%Y-%m-%d %H' )), 1, 0)
+
+#Period 2
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-02-27 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-01-29 00',format ='%Y-%m-%d %H' )), 2, pred2015df$BillPeriod)
+#Period 3
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-03-28 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-02-27 00',format ='%Y-%m-%d %H' )), 3, pred2015df$BillPeriod)
+#Period 4
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-04-29 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-03-28 00',format ='%Y-%m-%d %H' )), 4, pred2015df$BillPeriod)
+#Period 5
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-05-28 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-04-29 00',format ='%Y-%m-%d %H' )), 5, pred2015df$BillPeriod)
+#Period 6
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-06-27 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-05-28 00',format ='%Y-%m-%d %H' )), 6, pred2015df$BillPeriod)
+#Period 7
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-07-31 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-06-27 00',format ='%Y-%m-%d %H' )), 7, pred2015df$BillPeriod)
+#Period 8
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-08-29 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-07-31 00',format ='%Y-%m-%d %H' )), 8, pred2015df$BillPeriod)
+#Period 9
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-09-29 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-08-29 00',format ='%Y-%m-%d %H' )), 9, pred2015df$BillPeriod)
+#Period 10
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-10-29 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-09-29 00',format ='%Y-%m-%d %H' )), 10, pred2015df$BillPeriod)
+#Period 11
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour < as.POSIXct(strptime('2015-11-26 00',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-10-29 00',format ='%Y-%m-%d %H' )),11, pred2015df$BillPeriod)
+#Period 12
+pred2015df$BillPeriod <- ifelse(pred2015df$DayHour <= as.POSIXct(strptime('2015-12-29 23',format ='%Y-%m-%d %H' )) & pred2015df$DayHour >= as.POSIXct(strptime('2015-11-26 00',format ='%Y-%m-%d %H' )), 12, pred2015df$BillPeriod)
+
+
+#Aggregate by BillPeriod 
+resultsdf <- aggregate(PredkWh ~ BillPeriod,pred2015df,sum)
+#remove totals from days that occured after 12-29-2015 in the data
+resultsdf <- subset(resultsdf,BillPeriod != 0)
+
+#
+resultsdf <- data.frame(billsdf$billdate, resultsdf$PredkWh, billsdf$kwh)
+names(resultsdf) <- c("Bill Date", "PredkWh", "ActualkWh")
+resultsdf
+```
+
+
+At this point, we see a consistent trend of the model over predicting the actual kWh billed for the period. Additional analysis is needed to further examine the modeling processes to look for discrepancies or reasons why the model is over-predicting. Past that it would also be interesting to do further research on where the billing data is coming from to see if that completely lines up with the electric load data, or if they are being reported by different parties. 
+
+
+
+
